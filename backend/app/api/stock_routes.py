@@ -19,9 +19,10 @@ def get_stock(ticker: str):
 @router.get("/{ticker}/history", response_model=list[HistoricalDataPoint]) 
 def stock_history(
     ticker:str,
-    period:str=Query(default="1y",description= "1mo, 3mo, 6mo, 1y, 5y")
+    period:str=Query(default="1y",description= "5d, 1mo, 3mo, 6mo, 1y, 5y")
 ):
     allowed_periods = [
+        "5d",
         "1mo",
         "3mo",
         "6mo",
