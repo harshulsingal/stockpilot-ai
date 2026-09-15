@@ -14,16 +14,25 @@ import type { PortfolioHolding } from "../types/portfolio";
 
 type Props = {
   holdings: PortfolioHolding[];
+
   onEdit: (
     holding: PortfolioHolding
   ) => void;
-  onDelete: (id: number) => void;
+
+  onDelete: (
+    id: number
+  ) => void;
+
+  onAnalyze: (
+    ticker: string
+  ) => void;
 };
 
 export default function PortfolioTable({
   holdings,
   onEdit,
   onDelete,
+  onAnalyze,
 }: Props) {
   if (holdings.length === 0) {
     return (
@@ -82,9 +91,7 @@ export default function PortfolioTable({
                 key={holding.id}
               >
                 <TableCell>
-                  {
-                    holding.ticker
-                  }
+                  {holding.ticker}
                 </TableCell>
 
                 <TableCell>
@@ -94,9 +101,7 @@ export default function PortfolioTable({
                 </TableCell>
 
                 <TableCell>
-                  {
-                    holding.quantity
-                  }
+                  {holding.quantity}
                 </TableCell>
 
                 <TableCell>
@@ -132,6 +137,7 @@ export default function PortfolioTable({
                   <Button
                     size="small"
                     color="error"
+                    sx={{ mr: 1 }}
                     onClick={() =>
                       onDelete(
                         holding.id
@@ -139,6 +145,18 @@ export default function PortfolioTable({
                     }
                   >
                     Delete
+                  </Button>
+
+                  <Button
+                    size="small"
+                    color="success"
+                    onClick={() =>
+                      onAnalyze(
+                        holding.ticker
+                      )
+                    }
+                  >
+                    Analyze
                   </Button>
                 </TableCell>
               </TableRow>

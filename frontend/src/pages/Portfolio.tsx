@@ -14,7 +14,8 @@ import {
   getPortfolio,
   deleteHolding,
 } from "../services/portfolioService";
-
+import { getAnalysis } from "../services/analysisService";
+import AIResearchReport from "../components/AIResearchReport";
 export default function Portfolio() {
   const [holdings, setHoldings] = useState<
     PortfolioHolding[]
@@ -33,21 +34,8 @@ export default function Portfolio() {
     PortfolioHolding | null
   >(null);
 
-  const fetchPortfolio =
-    async () => {
-      try {
-        const data =
-          await getPortfolio();
-
-        setHoldings(data);
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
   useEffect(() => {
+    // fetchPortfolio is defined above so it can be reused elsewhere
     fetchPortfolio();
   }, []);
 
@@ -64,6 +52,26 @@ export default function Portfolio() {
 
     setDialogOpen(true);
   };
+  type AnalysisResult = {
+    analysis: {
+      recommendation: string;
+      confidence_score: number;
+      summary: string;
+    };
+  } | null;
+
+  const [analysis, setAnalysis] =
+    useState<AnalysisResult>(null);
+
+  const [
+    analysisLoading,
+    setAnalysisLoading,
+  ] = useState(false);
+
+  const [
+    selectedTicker,
+    setSelectedTicker,
+  ] = useState("");
 
   const handleDelete = async (
   id: number
@@ -81,7 +89,28 @@ export default function Portfolio() {
     console.error(error);
   }
 };
+const handleAnalyze = async (
+  ticker: string
+) => {
+  try {
+    setAnalysisLoading(true);
 
+    const result =
+      await getAnalysis(
+        ticker
+      );
+
+    setAnalysis(result);
+
+    setSelectedTicker(
+      ticker
+    );
+  } catch (error) {
+    console.error(error);
+  } finally {
+    setAnalysisLoading(false);
+  }
+};
   const handleCloseDialog =
     () => {
       setDialogOpen(false);
@@ -95,6 +124,18 @@ export default function Portfolio() {
 
       handleCloseDialog();
     };
+
+  // define fetchPortfolio here so other handlers can call it
+  async function fetchPortfolio() {
+    try {
+      const data = await getPortfolio();
+      setHoldings(data);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -140,7 +181,13 @@ export default function Portfolio() {
         holdings={holdings}
         onEdit={handleEdit}
         onDelete={handleDelete}
+        onAnalyze={handleAnalyze}
       />
+      <AIResearchReport
+        analysis={analysis}
+        loading={analysisLoading}
+        ticker={selectedTicker}
+        />
 
       <HoldingDialog
         open={dialogOpen}

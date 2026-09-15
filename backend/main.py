@@ -9,13 +9,18 @@ from app.models.user import User
 from app.models.portfolio import PortfolioHolding
 from app.api.portfolio_routes import router as portfolio_router
 
-
+from app.api.analysis_routes import (
+    router as analysis_router
+)
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title=settings.APP_NAME,
     version="1.0.0"
+)
+app.include_router(
+    analysis_router
 )
 app.include_router(portfolio_router)
 @app.get("/")
