@@ -95,6 +95,28 @@ How the new pipeline works (brief)
 3. `sentiment_service.analyze_articles` — attach VADER sentiment and `clean_text` to each article
 4. `ai_analysis_service.analyze_stock` — call OpenAI, parse JSON response and validate against `AnalysisResponse`
 
+**Pipeline Graph (Node View)**
+
+```mermaid
+flowchart TD
+    Start([Ticker Input]) --> N1[Node: fetch_market_data]
+    N1 --> N2[Node: fetch_news]
+    N2 --> N3[Node: analyze_sentiment]
+    N3 --> N4[Node: build_news_context]
+    N4 --> N5[Node: call_llm_analysis]
+    N5 --> N6{Valid JSON + Pydantic schema?}
+    N6 -->|Yes| N7[Node: cache_result in Redis]
+    N6 -->|No / retry exhausted| N8[Return error / None]
+    N7 --> End([Return AnalysisResponse])
+    N8 --> End
+
+    style N6 fill:#fff3cd,stroke:#333
+    style N8 fill:#f8d7da,stroke:#333
+    style N7 fill:#d4edda,stroke:#333
+```
+
+*Each node is a plain Python function composed in [backend/app/services/langgraph_pipeline.py](backend/app/services/langgraph_pipeline.py); the flow mimics a LangGraph state-graph without requiring the full LangGraph runtime.*
+
 Developer notes
 - The LangGraph pipeline here is a local, dependency-free orchestration (file: `backend/app/services/langgraph_pipeline.py`) so you can iterate without adding a third-party runtime. If you want, I can swap this for an official `langgraph` package integration and wire real graph nodes and a UI.
 - VADER is a lightweight NLP tool good for short texts (news headlines and summaries). For higher accuracy consider a transformer-based sentiment model later.
@@ -142,6 +164,23 @@ GET /analysis/{ticker}?background=true
 
 ```
 GET /analysis/status/{task_id}
+```
+
+**Background Processing Flow (Celery + Redis)**
+
+```mermaid
+flowchart LR
+    Client[Client / UI] -->|GET /analysis/ticker?background=true| API[FastAPI Route]
+    API -->|delay task| Broker[(Redis Broker)]
+    Broker --> Worker[Celery Worker Process]
+    Worker -->|run_pipeline_for_ticker| Pipeline[LangGraph Pipeline]
+    Pipeline --> Result[Analysis Result]
+    Result -->|SETEX ttl=3600s| RedisCache[(Redis Cache)]
+    API -->|task_id| Client
+    Client -->|GET /analysis/status/task_id| API
+    API -->|GET cached result| RedisCache
+    RedisCache -->|JSON result| API
+    API -->|200 OK| Client
 ```
 
 Transformer sentiment notes
@@ -242,11 +281,89 @@ Operational notes & caveats
 - Persistence: SQLAlchemy ORM with PostgreSQL (connection configured in [backend/app/core/database.py](backend/app/core/database.py)). Models include `User` and `PortfolioHolding`.
 - Authentication: JWT tokens are created/verified in [backend/app/core/jwt_handler.py](backend/app/core/jwt_handler.py). Password hashing uses `passlib` via [backend/app/core/security.py](backend/app/core/security.py).
 
+**Entity Relationship Diagram (Database Models)**
+
+```mermaid
+erDiagram
+    USER ||--o{ PORTFOLIO_HOLDING : owns
+
+    USER {
+        int id PK
+        string email UK
+        string username UK
+        string password_hash
+        datetime created_at
+    }
+
+    PORTFOLIO_HOLDING {
+        int id PK
+        int user_id FK
+        string ticker
+        string company_name
+        float quantity
+        float average_price
+        datetime created_at
+    }
+```
+
+*Note: `PORTFOLIO_HOLDING` has a unique constraint `unique_user_ticker` on `(user_id, ticker)` — a user cannot have two separate holding rows for the same ticker.*
+
 Data flow (typical analysis request):
 1. Frontend calls `GET /analysis/{ticker}` ([backend/app/api/analysis_routes.py](backend/app/api/analysis_routes.py)).
 2. Backend fetches market data via Yahoo (yfinance) in `market_service` and retrieves news via `news_service`.
 3. `build_news_context` converts articles into a string context.
 4. `ai_analysis_service` sends prompt+context to OpenAI and returns structured JSON analysis.
+
+**Sequence Diagram — Analysis Request (sync vs background)**
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React UI
+    participant API as FastAPI /analysis
+    participant Cache as Redis Cache
+    participant Pipe as Pipeline
+    participant Mkt as market_service
+    participant News as news_service
+    participant Sent as sentiment_service
+    participant LLM as ai_analysis_service (OpenAI)
+    participant Worker as Celery Worker
+
+    User->>UI: Request analysis for TICKER
+    UI->>API: GET /analysis/{ticker}?background=bool
+
+    alt cached result exists
+        API->>Cache: GET cache[ticker]
+        Cache-->>API: cached JSON
+        API-->>UI: 200 OK (cached analysis)
+    else background=true
+        API->>Worker: run_analysis_task.delay(ticker)
+        Worker-->>API: task_id
+        API-->>UI: 202 Accepted { task_id }
+        Worker->>Pipe: run_pipeline_for_ticker(ticker)
+        Pipe->>Mkt: get_stock_data(ticker)
+        Pipe->>News: get_stock_news(company, ticker)
+        Pipe->>Sent: analyze_articles(articles)
+        Pipe->>LLM: analyze_stock(market_data, news_context)
+        LLM-->>Pipe: validated AnalysisResponse
+        Pipe-->>Worker: result dict
+        Worker->>Cache: SETEX result (TTL 1h)
+        UI->>API: GET /analysis/status/{task_id}
+        API->>Cache: GET result
+        Cache-->>API: result JSON
+        API-->>UI: 200 OK (result)
+    else background=false (synchronous)
+        API->>Pipe: run_pipeline_for_ticker(ticker)
+        Pipe->>Mkt: get_stock_data(ticker)
+        Pipe->>News: get_stock_news(company, ticker)
+        Pipe->>Sent: analyze_articles(articles)
+        Pipe->>LLM: analyze_stock(market_data, news_context)
+        LLM-->>Pipe: validated AnalysisResponse
+        Pipe-->>API: result dict
+        API->>Cache: SETEX result (TTL 1h)
+        API-->>UI: 200 OK (analysis)
+    end
+```
 
 Key files to inspect for behavior and logic:
 - [backend/main.py](backend/main.py) — app setup and router registration
@@ -308,6 +425,50 @@ Security & Auth Details
 - Authentication uses JWT (`HS256`) with `SECRET_KEY` from environment. Token creation/verification in [backend/app/core/jwt_handler.py](backend/app/core/jwt_handler.py). Tokens encode `sub` as the user id.
 - Passwords are hashed with bcrypt via `passlib` in [backend/app/core/security.py](backend/app/core/security.py).
 - Protected routes use an HTTP Bearer dependency implemented in [backend/app/dependencies/auth.py](backend/app/dependencies/auth.py) that extracts the token, verifies it, and loads the `User` from DB.
+
+**Sequence Diagram — Auth Flow (Signup/Login + Protected Request)**
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React UI
+    participant API as FastAPI /auth
+    participant Svc as auth_services
+    participant Sec as security.py (bcrypt)
+    participant JWT as jwt_handler.py
+    participant DB as Postgres
+
+    User->>UI: Submit signup form
+    UI->>API: POST /auth/signup {email, username, password}
+    API->>Svc: create_user(...)
+    Svc->>Sec: hash_password(password)
+    Sec-->>Svc: password_hash
+    Svc->>DB: INSERT User
+    DB-->>Svc: User row
+    Svc-->>API: User created
+    API-->>UI: 201 Created
+
+    User->>UI: Submit login form
+    UI->>API: POST /auth/login {email, password}
+    API->>Svc: authenticate(email, password)
+    Svc->>DB: SELECT User by email
+    DB-->>Svc: User row
+    Svc->>Sec: verify(password, password_hash)
+    Sec-->>Svc: match / no match
+    Svc->>JWT: create_access_token(sub=user.id)
+    JWT-->>Svc: signed JWT
+    Svc-->>API: access_token
+    API-->>UI: 200 OK {access_token}
+    UI->>UI: store token in localStorage
+
+    User->>UI: Request protected resource
+    UI->>API: GET /portfolio (Authorization: Bearer token)
+    API->>JWT: verify_token(token)
+    JWT-->>API: decoded payload {sub}
+    API->>DB: SELECT User by id
+    DB-->>API: User row
+    API-->>UI: 200 OK (resource)
+```
 
 Third-party integrations
 - yfinance (`yfinance`) — stock metrics and news (backup) ([backend/app/services/market_service.py](backend/app/services/market_service.py), [backend/app/services/stock_services.py](backend/app/services/stock_services.py)).
